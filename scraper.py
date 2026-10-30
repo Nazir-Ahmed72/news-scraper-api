@@ -101,32 +101,65 @@ def search_first_result(driver, keyword):
         or _try(driver, "DuckDuckGo", DDG_SEARCH_URL.format(site_q))
     )
 
+BOILERPLATE = (
+    "cookie", "privacy", "you will leave", "japan's only public media",
+    "all rights reserved", "copyright", "javascript", "consent",
+    "by clicking", "terms of use",
+)
+
+
+def _clean(paragraphs):
+    """Drop short, duplicate and boilerplate paragraphs."""
+    out, seen = [], set()
+    for p in paragraphs:
+        t = " ".join((p or "").split())
+        low = t.lower()
+        if len(t) < 40 or t in seen or any(b in low for b in BOILERPLATE):
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
 
 def fetch_article_text(driver, url):
     """Open the article and return (title, body_text)."""
     driver.get(url)
+
+    # Wait until real article paragraphs appear (not just the cookie banner)
     try:
-        WebDriverWait(driver, 20).until(
-            lambda d: len([p for p in d.find_elements(By.TAG_NAME, "p") if len(p.text) > 40]) > 0
+        WebDriverWait(driver, 25).until(
+            lambda d: _clean([e.text for e in d.find_elements(By.TAG_NAME, "p")])
         )
     except TimeoutException:
-        log("article: paragraphs did not load in time")
+        log("article: real paragraphs did not load in time")
 
     title = ""
     h1 = driver.find_elements(By.TAG_NAME, "h1")
     if h1:
         title = h1[0].text.strip()
 
-    paragraphs = [p.text.strip() for p in driver.find_elements(By.TAG_NAME, "p")]
-    body = " ".join(p for p in paragraphs if len(p) > 40)
+    # Prefer paragraphs inside the article area of the page
+    body = ""
+    for sel in ["article p", "main p", "[class*='article'] p",
+                "[class*='body'] p", "[class*='content'] p", "p"]:
+        paras = _clean([e.text for e in driver.find_elements(By.CSS_SELECTOR, sel)])
+        if paras:
+            body = " ".join(paras)
+            log(f"article: selector '{sel}' gave {len(paras)} paragraphs")
+            break
+
+    # If the body is still short, add the page's meta description
+    if len(body) < 150:
+        for m in driver.find_elements(
+            By.CSS_SELECTOR, "meta[property='og:description'], meta[name='description']"
+        ):
+            desc = (m.get_attribute("content") or "").strip()
+            if desc and desc not in body:
+                body = (desc + " " + body).strip()
+                break
 
     if not body:
-        metas = driver.find_elements(
-            By.CSS_SELECTOR, "meta[name='description'], meta[property='og:description']"
-        )
-        for m in metas:
-            body = m.get_attribute("content") or ""
-            if body:
-                break
+        body = title
+
     log(f"article: title='{title}', chars={len(body)}")
     return title, body
